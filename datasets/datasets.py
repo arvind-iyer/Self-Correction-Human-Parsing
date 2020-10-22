@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 # -*- encoding: utf-8 -*-
-
 """
 @Author  :   Peike Li
 @Contact :   peike.li@yahoo.com
@@ -12,6 +11,7 @@
 """
 
 import os
+import glob
 import numpy as np
 import random
 import torch
@@ -21,8 +21,14 @@ from utils.transforms import get_affine_transform
 
 
 class LIPDataSet(data.Dataset):
-    def __init__(self, root, dataset, crop_size=[473, 473], scale_factor=0.25,
-                 rotation_factor=30, ignore_label=255, transform=None):
+    def __init__(self,
+                 root,
+                 dataset,
+                 crop_size=[473, 473],
+                 scale_factor=0.25,
+                 rotation_factor=30,
+                 ignore_label=255,
+                 transform=None):
         self.root = root
         self.aspect_ratio = crop_size[1] * 1.0 / crop_size[0]
         self.crop_size = np.asarray(crop_size)
@@ -60,8 +66,11 @@ class LIPDataSet(data.Dataset):
     def __getitem__(self, index):
         train_item = self.train_list[index]
 
-        im_path = os.path.join(self.root, self.dataset + '_images', train_item + '.jpg')
-        parsing_anno_path = os.path.join(self.root, self.dataset + '_segmentations', train_item + '.png')
+        im_path = os.path.join(self.root, self.dataset + '_images',
+                               train_item + '.jpg')
+        parsing_anno_path = os.path.join(self.root,
+                                         self.dataset + '_segmentations',
+                                         train_item + '.png')
 
         im = cv2.imread(im_path, cv2.IMREAD_COLOR)
         h, w, _ = im.shape
@@ -78,7 +87,8 @@ class LIPDataSet(data.Dataset):
                 sf = self.scale_factor
                 rf = self.rotation_factor
                 s = s * np.clip(np.random.randn() * sf + 1, 1 - sf, 1 + sf)
-                r = np.clip(np.random.randn() * rf, -rf * 2, rf * 2) if random.random() <= 0.6 else 0
+                r = np.clip(np.random.randn() * rf, -rf * 2, rf *
+                            2) if random.random() <= 0.6 else 0
 
                 if random.random() <= self.flip_prob:
                     im = im[:, ::-1, :]
@@ -95,8 +105,7 @@ class LIPDataSet(data.Dataset):
         trans = get_affine_transform(person_center, s, r, self.crop_size)
         input = cv2.warpAffine(
             im,
-            trans,
-            (int(self.crop_size[1]), int(self.crop_size[0])),
+            trans, (int(self.crop_size[1]), int(self.crop_size[0])),
             flags=cv2.INTER_LINEAR,
             borderMode=cv2.BORDER_CONSTANT,
             borderValue=(0, 0, 0))
@@ -118,8 +127,7 @@ class LIPDataSet(data.Dataset):
         else:
             label_parsing = cv2.warpAffine(
                 parsing_anno,
-                trans,
-                (int(self.crop_size[1]), int(self.crop_size[0])),
+                trans, (int(self.crop_size[1]), int(self.crop_size[0])),
                 flags=cv2.INTER_NEAREST,
                 borderMode=cv2.BORDER_CONSTANT,
                 borderValue=(255))
@@ -130,7 +138,12 @@ class LIPDataSet(data.Dataset):
 
 
 class LIPDataValSet(data.Dataset):
-    def __init__(self, root, dataset='val', crop_size=[473, 473], transform=None, flip=False):
+    def __init__(self,
+                 root,
+                 dataset='val',
+                 crop_size=[473, 473],
+                 transform=None,
+                 flip=False):
         self.root = root
         self.crop_size = crop_size
         self.transform = transform
@@ -168,7 +181,8 @@ class LIPDataValSet(data.Dataset):
     def __getitem__(self, index):
         val_item = self.val_list[index]
         # Load training image
-        im_path = os.path.join(self.root, self.dataset + '_images', val_item + '.jpg')
+        im_path = os.path.join(self.root, self.dataset + '_images',
+                               val_item + '.jpg')
         im = cv2.imread(im_path, cv2.IMREAD_COLOR)
         h, w, _ = im.shape
         # Get person center and scale
@@ -177,8 +191,81 @@ class LIPDataValSet(data.Dataset):
         trans = get_affine_transform(person_center, s, r, self.crop_size)
         input = cv2.warpAffine(
             im,
-            trans,
-            (int(self.crop_size[1]), int(self.crop_size[0])),
+            trans, (int(self.crop_size[1]), int(self.crop_size[0])),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(0, 0, 0))
+        input = self.transform(input)
+        flip_input = input.flip(dims=[-1])
+        if self.flip:
+            batch_input_im = torch.stack([input, flip_input])
+        else:
+            batch_input_im = input
+
+        meta = {
+            'name': val_item,
+            'center': person_center,
+            'height': h,
+            'width': w,
+            'scale': s,
+            'rotation': r
+        }
+
+        return batch_input_im, meta
+
+
+class LIPStreamDataset(data.Dataset):
+    def __init__(self,
+                 stream_id,
+                 crop_size=[473, 473],
+                 transform=None,
+                 flip=False,
+                 root="/tmp/"):
+        self.crop_size = crop_size
+        self.transform = transform
+        self.flip = flip
+        self.stream_id = stream_id
+        self.aspect_ratio = crop_size[1] * 1.0 / crop_size[0]
+        self.crop_size = np.asarray(crop_size)
+        self.root = root
+
+        self.im_path_fmt = os.path.join(self.root, self.stream_id, "{}.jpg")
+
+    def __len__(self):
+        return len(glob.glob(self.im_path_fmt.format("*")))
+
+    def _box2cs(self, box):
+        x, y, w, h = box[:4]
+        return self._xywh2cs(x, y, w, h)
+
+    def _xywh2cs(self, x, y, w, h):
+        center = np.zeros((2), dtype=np.float32)
+        center[0] = x + w * 0.5
+        center[1] = y + h * 0.5
+        if w > self.aspect_ratio * h:
+            h = w * 1.0 / self.aspect_ratio
+        elif w < self.aspect_ratio * h:
+            w = h * self.aspect_ratio
+        scale = np.array([w * 1.0, h * 1.0], dtype=np.float32)
+
+        return center, scale
+
+    def __getitem__(self, index):
+        val_item = self.val_list[index]
+        # Load training image
+        im_path = self.im_path_fmt.format(index)
+        im = cv2.imread(im_path, cv2.IMREAD_COLOR)
+        if im is None:
+            # image not ready
+            return
+        h, w, _ = im.shape
+        # Get person center and scale
+        person_center, s = self._box2cs([0, 0, w - 1, h - 1])
+        r = 0
+        trans = get_affine_transform(person_center, s, r, self.crop_size)
+        input = cv2.warpAffine(
+            im,
+            trans, (int(self.crop_size[1]), int(self.crop_size[0])),
             flags=cv2.INTER_LINEAR,
             borderMode=cv2.BORDER_CONSTANT,
             borderValue=(0, 0, 0))
